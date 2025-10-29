@@ -87,10 +87,6 @@ export default function InfoEditor({ value, onChange, onAddSection, onRemoveSect
                             sectionIndex={idx}
                             section={section}
                             onUpdateSection={onUpdateSection}
-                            onChangeSection={(partial) => onChange({
-                                ...value,
-                                sections: value.sections.map((s, i) => i === idx ? { ...s, ...partial } : s)
-                            })}
                         />
                     </div>
                 )})}
@@ -107,10 +103,9 @@ type ContentEditorProps = {
     sectionIndex: number;
     section: Section;
     onUpdateSection: (index: number, key: keyof Section, value: any) => void;
-    onChangeSection: (partial: Partial<Section>) => void;
 }
 
-function ContentEditor({ sectionIndex, section, onUpdateSection, onChangeSection }: ContentEditorProps) {
+function ContentEditor({ sectionIndex, section, onUpdateSection }: ContentEditorProps) {
     const isList = Array.isArray(section.content);
 
     const switchType = (type: 'text' | 'list') => {

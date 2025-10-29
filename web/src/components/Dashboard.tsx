@@ -48,7 +48,7 @@ export default function Dashboard({ locations, setLocations, times, setTimes, re
     const sorted = sortLocations(locations)
     const q = locQuery.toLowerCase()
     return sorted
-      .map((e, i) => i)
+      .map((_, i) => i)
       .filter(i => {
         const e = sorted[i]
         return !q || `${e.location} ${e.venue} ${e.id}`.toLowerCase().includes(q)
@@ -147,7 +147,7 @@ export default function Dashboard({ locations, setLocations, times, setTimes, re
                       <button onClick={() => setTimes(sortTimes([ ...times, { locationId: loc.id, datetime: new Date().toISOString().slice(0,16)+':00' } ]))}>+ Add time</button>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                      {locTimes.map((t, i) => (
+                      {locTimes.map((t) => (
                         <div key={`${t.locationId}|${t.datetime}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                           <input type="datetime-local" value={t.datetime.slice(0,16)} onChange={e => {
                             const next = times.map(x => x === t ? { ...t, datetime: e.target.value } : x)

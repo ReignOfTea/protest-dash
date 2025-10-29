@@ -22,8 +22,10 @@ if (missingEnvVars.length > 0) {
 
 const app = express();
 const port = process.env.PORT || 3001;
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5173';
 const isProduction = process.env.NODE_ENV === 'production';
+// FRONTEND_URL is only needed for development redirects to Vite dev server
+// In production, URLs are constructed from the request
+const FRONTEND_URL = process.env.FRONTEND_URL || (isProduction ? undefined : 'http://localhost:5173');
 
 // Session configuration
 app.use(session({
@@ -42,24 +44,22 @@ app.use(passport.session());
 
 // CORS with credentials
 app.use(cors({
-  origin: FRONTEND_URL,
+  origin: isProduction 
+    ? (origin, callback) => {
+        // In production, allow requests from the same origin (when serving from same domain)
+        // If you need to allow specific origins, set FRONTEND_URL
+        if (!origin || !FRONTEND_URL) {
+          callback(null, true); // Allow same-origin requests
+        } else {
+          callback(null, origin === FRONTEND_URL);
+        }
+      }
+    : FRONTEND_URL || 'http://localhost:5173',
   credentials: true
 }));
 app.use(express.json({ limit: '1mb' }));
 
-// Serve static files in production
-if (isProduction) {
-  app.use(express.static(path.join(__dirname, '../web/dist')));
-}
-
-// Redirect root to frontend
-app.get('/', (req, res) => {
-  if (isProduction) {
-    res.sendFile(path.join(__dirname, '../web/dist/index.html'));
-  } else {
-    res.redirect(FRONTEND_URL);
-  }
-});
+// API and auth routes will be defined below, before static file serving
 
 // Config for the target repo and path
 const OWNER = 'ReignOfTea';
@@ -175,13 +175,19 @@ app.get('/auth/discord/callback', (req, res, next) => {
     if (!user) {
       // Extract userId from info if available
       const userId = info?.userId || '';
-      return res.redirect(`${FRONTEND_URL}?error=unauthorized${userId ? `&userId=${encodeURIComponent(userId)}` : ''}`);
+      const redirectUrl = isProduction && !FRONTEND_URL
+        ? `${req.protocol}://${req.get('host')}?error=unauthorized${userId ? `&userId=${encodeURIComponent(userId)}` : ''}`
+        : `${FRONTEND_URL}?error=unauthorized${userId ? `&userId=${encodeURIComponent(userId)}` : ''}`;
+      return res.redirect(redirectUrl);
     }
     req.logIn(user, (err) => {
       if (err) {
         return next(err);
       }
-      return res.redirect(FRONTEND_URL);
+      const redirectUrl = isProduction && !FRONTEND_URL
+        ? `${req.protocol}://${req.get('host')}`
+        : FRONTEND_URL;
+      return res.redirect(redirectUrl);
     });
   })(req, res, next);
 });
@@ -394,8 +400,43 @@ app.get('/api/actions/latest', requireAuth, async (req, res) => {
   }
 });
 
+// Serve static files and handle SPA routing (must be after all API routes)
+if (isProduction) {
+  // Serve static assets (JS, CSS, images, etc.)
+  app.use(express.static(path.join(__dirname, '../web/dist')));
+  
+  // Catch-all route: serve index.html for client-side routing
+  // In Express 5, use app.use() to catch all unmatched routes
+  app.use((req, res) => {
+    // API and auth routes should have been handled above, so if we reach here
+    // and it's an API/auth route, return 404
+    if (req.path.startsWith('/api') || req.path.startsWith('/auth')) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    // For all other routes, serve the SPA
+    res.sendFile(path.join(__dirname, '../web/dist/index.html'));
+  });
+} else {
+  // In development, redirect to Vite dev server (requires FRONTEND_URL)
+  app.use((req, res) => {
+    // API and auth routes should have been handled above
+    if (req.path.startsWith('/api') || req.path.startsWith('/auth')) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    if (!FRONTEND_URL) {
+      return res.status(500).json({ error: 'FRONTEND_URL not configured for development' });
+    }
+    res.redirect(FRONTEND_URL + req.path);
+  });
+}
+
 app.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
+  if (isProduction) {
+    console.log(`Serving production build from: ${path.join(__dirname, '../web/dist')}`);
+  } else {
+    console.log(`Redirecting to frontend dev server: ${FRONTEND_URL}`);
+  }
 });
 
 
