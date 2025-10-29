@@ -91,9 +91,44 @@ export DISCORD_CALLBACK_URL=https://your-domain.com/auth/discord/callback
 ```
 
 3. Start the production server:
+
+**Option A: Using npm (simple):**
 ```bash
 npm start
 ```
+
+**Option B: Using PM2 (recommended for production):**
+```bash
+# Install PM2 globally (if not already installed)
+npm install -g pm2
+
+# Start with PM2 using the ecosystem config (automatically loads .env)
+pm2 start ecosystem.config.js
+
+# Or start directly with .env file:
+pm2 start server/index.js --name protest-dash --env-file .env
+
+# View logs
+pm2 logs protest-dash
+
+# Monitor
+pm2 monit
+
+# Stop
+pm2 stop protest-dash
+
+# Restart
+pm2 restart protest-dash
+
+# Delete from PM2
+pm2 delete protest-dash
+
+# Save PM2 process list for auto-start on reboot
+pm2 save
+pm2 startup
+```
+
+**Note:** The server automatically loads the `.env` file from the project root. Make sure your `.env` file exists and contains all required variables.
 
 The server will serve the built frontend and handle API requests on the same port.
 
