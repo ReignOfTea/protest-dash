@@ -72,7 +72,7 @@ export default function InfoEditor({ value, onChange, onAddSection, onRemoveSect
                     <div key={idx} className="section-card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                             <strong>Section {idx + 1}</strong>
-                            <button onClick={() => onRemoveSection(idx)} style={{ background: '#ef4444' }}>Remove</button>
+                            <button onClick={() => onRemoveSection(idx)} style={{ background: '#ef4444', padding: '6px 12px', fontSize: '14px' }}>Remove</button>
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                             <label style={{ fontWeight: 600 }}>Heading</label>
@@ -156,7 +156,7 @@ function ContentEditor({ sectionIndex, section, onUpdateSection }: ContentEditor
                             <button type="button" onClick={() => {
                                 const arr = (section.content as ListItem[]).filter((_, idx) => idx !== i);
                                 onUpdateSection(sectionIndex, 'content', arr);
-                            }} style={{ background: '#ef4444' }}>Remove</button>
+                            }} style={{ background: '#ef4444', padding: '6px 12px', fontSize: '14px', whiteSpace: 'nowrap' }}>Remove</button>
                         </div>
                     ))}
                     <div>
