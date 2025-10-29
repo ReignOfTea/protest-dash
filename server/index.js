@@ -8,7 +8,10 @@ const DiscordStrategy = require('passport-discord').Strategy;
 const fs = require('fs');
 const path = require('path');
 
-dotenv.config();
+// Load .env file from project root (one level up from server directory)
+// This ensures PM2 and other process managers can find it
+const envPath = path.join(__dirname, '..', '.env');
+dotenv.config({ path: envPath });
 
 const app = express();
 const port = process.env.PORT || 3001;
