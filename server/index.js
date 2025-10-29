@@ -23,6 +23,11 @@ if (missingEnvVars.length > 0) {
 const app = express();
 const port = process.env.PORT || 3001;
 const isProduction = process.env.NODE_ENV === 'production';
+
+// Trust proxy headers (important when behind Nginx Proxy Manager)
+// This ensures req.protocol and req.get('host') are correct for redirects
+app.set('trust proxy', true);
+
 // FRONTEND_URL is only needed for development redirects to Vite dev server
 // In production, URLs are constructed from the request
 const FRONTEND_URL = process.env.FRONTEND_URL || (isProduction ? undefined : 'http://localhost:5173');
@@ -30,12 +35,15 @@ const FRONTEND_URL = process.env.FRONTEND_URL || (isProduction ? undefined : 'ht
 // Session configuration
 app.use(session({
   secret: process.env.SESSION_SECRET,
-  resave: false,
+  resave: true, // Force save session even if not modified (helps with Passport)
   saveUninitialized: false,
+  name: 'connect.sid', // Explicit session name
   cookie: { 
-    secure: isProduction, // Use secure cookies in production (HTTPS only)
+    secure: isProduction, // Set to true for production HTTPS, false for development
     httpOnly: true,
-    maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    sameSite: isProduction ? 'none' : 'lax', // none required for cross-origin in production, lax for same-site
+    maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    path: '/', // Ensure cookie is available for all paths
   }
 }));
 
@@ -170,24 +178,52 @@ app.get('/auth/discord', passport.authenticate('discord'));
 app.get('/auth/discord/callback', (req, res, next) => {
   passport.authenticate('discord', (err, user, info) => {
     if (err) {
+      console.error('Discord OAuth error:', err);
       return next(err);
     }
     if (!user) {
       // Extract userId from info if available
       const userId = info?.userId || '';
-      const redirectUrl = isProduction && !FRONTEND_URL
-        ? `${req.protocol}://${req.get('host')}?error=unauthorized${userId ? `&userId=${encodeURIComponent(userId)}` : ''}`
-        : `${FRONTEND_URL}?error=unauthorized${userId ? `&userId=${encodeURIComponent(userId)}` : ''}`;
+      let redirectUrl;
+      if (isProduction && !FRONTEND_URL) {
+        // Auto-detect from request
+        const protocol = req.secure || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+        const host = req.get('host') || req.get('x-forwarded-host') || 'localhost';
+        redirectUrl = `${protocol}://${host}?error=unauthorized${userId ? `&userId=${encodeURIComponent(userId)}` : ''}`;
+      } else {
+        redirectUrl = `${FRONTEND_URL}?error=unauthorized${userId ? `&userId=${encodeURIComponent(userId)}` : ''}`;
+      }
       return res.redirect(redirectUrl);
     }
     req.logIn(user, (err) => {
       if (err) {
+        console.error('Login error:', err);
         return next(err);
       }
-      const redirectUrl = isProduction && !FRONTEND_URL
-        ? `${req.protocol}://${req.get('host')}`
-        : FRONTEND_URL;
-      return res.redirect(redirectUrl);
+      // Save session before redirect
+      req.session.save((err) => {
+        if (err) {
+          console.error('Session save error:', err);
+          return next(err);
+        }
+        let redirectUrl;
+        if (isProduction && !FRONTEND_URL) {
+          // Auto-detect from request
+          const protocol = req.secure || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+          const host = req.get('host') || req.get('x-forwarded-host') || 'localhost';
+          redirectUrl = `${protocol}://${host}`;
+        } else {
+          // In development, use the request origin if accessing directly, otherwise use FRONTEND_URL
+          if (!FRONTEND_URL || req.get('host')?.includes('localhost')) {
+            const protocol = req.protocol;
+            const host = req.get('host') || 'localhost:3001';
+            redirectUrl = `${protocol}://${host}`;
+          } else {
+            redirectUrl = FRONTEND_URL;
+          }
+        }
+        return res.redirect(redirectUrl);
+      });
     });
   })(req, res, next);
 });
