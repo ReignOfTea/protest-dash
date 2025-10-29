@@ -10,8 +10,20 @@ const path = require('path');
 
 dotenv.config();
 
+const app = express();
+const port = process.env.PORT || 3001;
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Development bypass mode - skip Discord OAuth
+const DEV_BYPASS_AUTH = !isProduction && process.env.DEV_BYPASS_AUTH === 'true';
+if (DEV_BYPASS_AUTH) {
+  console.warn('⚠️  DEVELOPMENT MODE: Authentication bypass enabled');
+  console.warn('⚠️  This should NEVER be enabled in production!');
+}
+
 // Validate required environment variables
-const requiredEnvVars = ['GITHUB_TOKEN', 'SESSION_SECRET', 'DISCORD_CLIENT_ID', 'DISCORD_CLIENT_SECRET'];
+// In development, Discord OAuth is optional if DEV_BYPASS_AUTH is enabled
+const requiredEnvVars = ['GITHUB_TOKEN', 'SESSION_SECRET'];
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
 
 if (missingEnvVars.length > 0) {
@@ -19,10 +31,6 @@ if (missingEnvVars.length > 0) {
   console.error('Please check your .env file.');
   process.exit(1);
 }
-
-const app = express();
-const port = process.env.PORT || 3001;
-const isProduction = process.env.NODE_ENV === 'production';
 
 // Trust proxy headers (important when behind Nginx Proxy Manager)
 // This ensures req.protocol and req.get('host') are correct for redirects
@@ -33,17 +41,29 @@ app.set('trust proxy', true);
 const FRONTEND_URL = process.env.FRONTEND_URL || (isProduction ? undefined : 'http://localhost:5173');
 
 // Session configuration
+// Use a session store to ensure persistence across requests
+const sessionStore = new (require('express-session').MemoryStore)();
+
+// Determine if we should use secure cookies and sameSite settings
+// Only use secure cookies when actually using HTTPS, not just when NODE_ENV=production
+// Browsers will reject secure cookies on HTTP connections (like localhost)
+// Also, sameSite: 'none' REQUIRES secure: true, so we can't use 'none' with HTTP
+const useSecureCookies = isProduction && process.env.USE_HTTPS === 'true';
+const sameSiteSetting = useSecureCookies ? 'none' : 'lax'; // 'none' requires secure: true
+
 app.use(session({
   secret: process.env.SESSION_SECRET,
   resave: true, // Force save session even if not modified (helps with Passport)
   saveUninitialized: false,
+  store: sessionStore, // Use in-memory store for development (consider Redis for production)
   name: 'connect.sid', // Explicit session name
   cookie: { 
-    secure: isProduction, // Set to true for production HTTPS, false for development
+    secure: useSecureCookies, // Only true when actually using HTTPS
     httpOnly: true,
-    sameSite: isProduction ? 'none' : 'lax', // none required for cross-origin in production, lax for same-site
+    sameSite: sameSiteSetting, // 'none' requires secure: true, so use 'lax' for HTTP
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     path: '/', // Ensure cookie is available for all paths
+    domain: undefined, // Don't restrict domain - let browser decide
   }
 }));
 
@@ -118,13 +138,14 @@ passport.deserializeUser((user, done) => {
   done(null, user);
 });
 
-// Discord OAuth Strategy
-passport.use(new DiscordStrategy({
-  clientID: process.env.DISCORD_CLIENT_ID,
-  clientSecret: process.env.DISCORD_CLIENT_SECRET,
-  callbackURL: process.env.DISCORD_CALLBACK_URL || 'http://localhost:3001/auth/discord/callback',
-  scope: ['identify']
-}, async (accessToken, refreshToken, profile, done) => {
+// Discord OAuth Strategy - only configure if not in bypass mode
+if (!DEV_BYPASS_AUTH) {
+  passport.use(new DiscordStrategy({
+    clientID: process.env.DISCORD_CLIENT_ID,
+    clientSecret: process.env.DISCORD_CLIENT_SECRET,
+    callbackURL: process.env.DISCORD_CALLBACK_URL || 'http://localhost:3001/auth/discord/callback',
+    scope: ['identify']
+  }, async (accessToken, refreshToken, profile, done) => {
   try {
     const allowed = await isUserAllowed(profile.id);
     if (!allowed) {
@@ -140,10 +161,16 @@ passport.use(new DiscordStrategy({
   } catch (err) {
     return done(err);
   }
-}));
+  }));
+}
 
 // Auth middleware
 function requireAuth(req, res, next) {
+  // In development bypass mode, allow all requests
+  if (DEV_BYPASS_AUTH) {
+    return next();
+  }
+  
   if (req.isAuthenticated()) {
     return next();
   }
@@ -167,15 +194,54 @@ async function fetchJsonFile(path) {
 
 // ===== AUTH ROUTES =====
 app.get('/api/auth/me', (req, res) => {
+  // In development bypass mode, return a mock user
+  if (DEV_BYPASS_AUTH) {
+    return res.json({
+      user: {
+        id: 'dev-user-123',
+        username: 'dev-user',
+        discriminator: '0',
+        avatar: null
+      }
+    });
+  }
+  
+  // Debug logging
+  console.log('Auth check - Session ID:', req.sessionID);
+  console.log('Auth check - Authenticated:', req.isAuthenticated());
+  console.log('Auth check - User:', req.user);
+  console.log('Auth check - Cookies:', req.headers.cookie);
+  console.log('Auth check - Session passport:', req.session?.passport);
+  console.log('Auth check - Session user:', req.session?.user);
+  
+  // Check if session exists in store (async, but log anyway)
+  if (req.sessionID) {
+    sessionStore.get(req.sessionID, (err, session) => {
+      if (err) {
+        console.error('Error checking session store:', err);
+      } else {
+        console.log('Session in store for', req.sessionID + ':', session ? 'Found' : 'Not found');
+        if (session) {
+          console.log('Session data in store:', {
+            passport: session.passport,
+            user: session.user
+          });
+        }
+      }
+    });
+  }
+  
   if (req.isAuthenticated()) {
     return res.json({ user: req.user });
   }
   return res.json({ user: null });
 });
 
-app.get('/auth/discord', passport.authenticate('discord'));
-
-app.get('/auth/discord/callback', (req, res, next) => {
+// Discord OAuth routes - only register if not in bypass mode
+if (!DEV_BYPASS_AUTH) {
+  app.get('/auth/discord', passport.authenticate('discord'));
+  
+  app.get('/auth/discord/callback', (req, res, next) => {
   passport.authenticate('discord', (err, user, info) => {
     if (err) {
       console.error('Discord OAuth error:', err);
@@ -200,33 +266,64 @@ app.get('/auth/discord/callback', (req, res, next) => {
         console.error('Login error:', err);
         return next(err);
       }
-      // Save session before redirect
+      
+      // Passport stores user in req.session.passport.user via serialization
+      // Ensure session is saved - Passport should have already modified it via logIn
       req.session.save((err) => {
         if (err) {
           console.error('Session save error:', err);
           return next(err);
         }
-        let redirectUrl;
-        if (isProduction && !FRONTEND_URL) {
-          // Auto-detect from request
-          const protocol = req.secure || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
-          const host = req.get('host') || req.get('x-forwarded-host') || 'localhost';
-          redirectUrl = `${protocol}://${host}`;
-        } else {
-          // In development, use the request origin if accessing directly, otherwise use FRONTEND_URL
-          if (!FRONTEND_URL || req.get('host')?.includes('localhost')) {
-            const protocol = req.protocol;
-            const host = req.get('host') || 'localhost:3001';
+        
+        // Verify session is saved in the store
+        const savedSessionId = req.sessionID;
+        sessionStore.get(savedSessionId, (err, session) => {
+          if (err) {
+            console.error('Error checking session store:', err);
+          } else {
+            console.log('Session in store:', session ? 'Found' : 'Not found');
+            if (session) {
+              console.log('Session user in store:', session.user || session.passport?.user);
+            }
+          }
+          
+          // Verify session is saved
+          console.log('OAuth success - Session ID:', savedSessionId);
+          console.log('OAuth success - User authenticated:', req.isAuthenticated());
+          console.log('OAuth success - User:', req.user);
+          console.log('OAuth success - Cookie will be:', req.session.cookie);
+          
+          let redirectUrl;
+          if (isProduction && !FRONTEND_URL) {
+            // Auto-detect from request
+            const protocol = req.secure || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+            const host = req.get('host') || req.get('x-forwarded-host') || 'localhost';
             redirectUrl = `${protocol}://${host}`;
           } else {
-            redirectUrl = FRONTEND_URL;
+            // In development, use the request origin if accessing directly, otherwise use FRONTEND_URL
+            if (!FRONTEND_URL || req.get('host')?.includes('localhost')) {
+              const protocol = req.protocol;
+              const host = req.get('host') || 'localhost:3001';
+              redirectUrl = `${protocol}://${host}`;
+            } else {
+              redirectUrl = FRONTEND_URL;
+            }
           }
-        }
-        return res.redirect(redirectUrl);
+          
+          console.log('OAuth success, redirecting to:', redirectUrl);
+          
+          // express-session automatically sets the cookie when we save
+          // The redirect response should include the Set-Cookie header
+          console.log('OAuth success - Final session ID:', savedSessionId);
+          console.log('OAuth success - Response headers will include Set-Cookie for session');
+          
+          return res.redirect(302, redirectUrl);
+        });
       });
     });
   })(req, res, next);
-});
+  });
+}
 
 app.post('/api/auth/logout', (req, res) => {
   req.logout((err) => {
@@ -321,6 +418,69 @@ app.get('/api/files', requireAuth, async (req, res) => {
   return res.json({ files: ['about.json', 'attend.json', 'more.json', 'locations.json', 'times.json', 'repeating-events.json', 'live.json'] });
 });
 
+// Helper function to generate detailed change report
+function generateChangeReport(oldContent, newContent, filePath) {
+  const fileName = filePath.split('/').pop();
+  const report = [];
+  
+  // Compare arrays (for locations.json, times.json, etc.)
+  if (Array.isArray(oldContent) && Array.isArray(newContent)) {
+    const oldCount = oldContent.length;
+    const newCount = newContent.length;
+    
+    if (oldCount !== newCount) {
+      report.push(`  - ${fileName}: ${oldCount} → ${newCount} entries`);
+      if (oldCount < newCount) {
+        report.push(`    • Added ${newCount - oldCount} new ${newCount - oldCount === 1 ? 'entry' : 'entries'}`);
+      } else {
+        report.push(`    • Removed ${oldCount - newCount} ${oldCount - newCount === 1 ? 'entry' : 'entries'}`);
+      }
+    } else {
+      // Same count, check for modifications
+      let modified = 0;
+      for (let i = 0; i < oldCount; i++) {
+        if (JSON.stringify(oldContent[i]) !== JSON.stringify(newContent[i])) {
+          modified++;
+        }
+      }
+      if (modified > 0) {
+        report.push(`  - ${fileName}: Modified ${modified} ${modified === 1 ? 'entry' : 'entries'}`);
+      } else {
+        report.push(`  - ${fileName}: No changes detected`);
+      }
+    }
+  } else if (typeof oldContent === 'object' && typeof newContent === 'object') {
+    // Compare objects (for about.json, attend.json, more.json)
+    const oldTitle = oldContent.title || '';
+    const newTitle = newContent.title || '';
+    const oldSections = oldContent.sections || [];
+    const newSections = newContent.sections || [];
+    
+    const changes = [];
+    if (oldTitle !== newTitle) {
+      changes.push('title');
+    }
+    if (oldSections.length !== newSections.length) {
+      changes.push(`${oldSections.length} → ${newSections.length} sections`);
+    } else {
+      const modifiedSections = oldSections.filter((oldSection, idx) => {
+        return JSON.stringify(oldSection) !== JSON.stringify(newSections[idx]);
+      });
+      if (modifiedSections.length > 0) {
+        changes.push(`${modifiedSections.length} modified ${modifiedSections.length === 1 ? 'section' : 'sections'}`);
+      }
+    }
+    
+    if (changes.length > 0) {
+      report.push(`  - ${fileName}: ${changes.join(', ')}`);
+    } else {
+      report.push(`  - ${fileName}: No changes detected`);
+    }
+  }
+  
+  return report.length > 0 ? report : [`  - ${fileName}: Updated`];
+}
+
 // Batch update multiple files in a single commit using Git Data API
 // Body: { files: [{ path: string, content: object }], commitMessage?: string }
 app.post('/api/batch', requireAuth, async (req, res) => {
@@ -329,6 +489,12 @@ app.post('/api/batch', requireAuth, async (req, res) => {
     if (!Array.isArray(files) || files.length === 0) {
       return res.status(400).json({ error: 'No files provided' });
     }
+    
+    // Get user info
+    const user = req.user;
+    const userId = user?.id || 'unknown';
+    const username = user?.username || 'unknown';
+    
     const headers = getGithubHeaders();
 
     // 1) Get ref heads/BRANCH
@@ -344,6 +510,36 @@ app.post('/api/batch', requireAuth, async (req, res) => {
       { headers }
     );
     const baseTreeSha = commitResp.data.tree.sha;
+
+    // Fetch old versions of files for comparison
+    const oldContents = await Promise.all(files.map(async (file) => {
+      try {
+        const response = await axios.get(
+          `https://api.github.com/repos/${OWNER}/${REPO}/contents/${encodeURIComponent(file.path)}?ref=${encodeURIComponent(BRANCH)}`,
+          { headers }
+        );
+        const contentBase64 = response.data.content;
+        const jsonText = Buffer.from(contentBase64, 'base64').toString('utf8');
+        return { path: file.path, content: JSON.parse(jsonText) };
+      } catch (err) {
+        // File doesn't exist yet - return appropriate default
+        const fileName = file.path.split('/').pop();
+        if (fileName === 'locations.json' || fileName === 'times.json' || 
+            fileName === 'repeating-events.json' || fileName === 'live.json') {
+          return { path: file.path, content: [] };
+        }
+        return { path: file.path, content: { title: '', sections: [] } };
+      }
+    }));
+
+    // Generate detailed change report
+    const changeReports = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const oldContent = oldContents[i]?.content;
+      const report = generateChangeReport(oldContent, file.content, file.path);
+      changeReports.push(...report);
+    }
 
     // 3) Create blobs for each file
     const blobPromises = files.map(async (file) => {
@@ -373,11 +569,23 @@ app.post('/api/batch', requireAuth, async (req, res) => {
     );
     const newTreeSha = treeResp.data.sha;
 
+    // Build detailed commit message
+    let fullCommitMessage = commitMessage || 'Update files via dashboard';
+    
+    // Add user info
+    fullCommitMessage += `\n\nUser: @${username} (ID: ${userId})`;
+    
+    // Add detailed change report
+    if (changeReports.length > 0) {
+      fullCommitMessage += '\n\nChanges:';
+      fullCommitMessage += '\n' + changeReports.join('\n');
+    }
+
     // 5) Create a commit
     const newCommitResp = await axios.post(
       `https://api.github.com/repos/${OWNER}/${REPO}/git/commits`,
       {
-        message: commitMessage || 'Update files via dashboard',
+        message: fullCommitMessage,
         tree: newTreeSha,
         parents: [latestCommitSha],
       },
@@ -437,9 +645,13 @@ app.get('/api/actions/latest', requireAuth, async (req, res) => {
 });
 
 // Serve static files and handle SPA routing (must be after all API routes)
-if (isProduction) {
+// Check if dist folder exists - if it does, serve it regardless of NODE_ENV
+const distPath = path.join(__dirname, '../web/dist');
+const distExists = fs.existsSync(distPath) && fs.existsSync(path.join(distPath, 'index.html'));
+
+if (isProduction || distExists) {
   // Serve static assets (JS, CSS, images, etc.)
-  app.use(express.static(path.join(__dirname, '../web/dist')));
+  app.use(express.static(distPath));
   
   // Catch-all route: serve index.html for client-side routing
   // In Express 5, use app.use() to catch all unmatched routes
@@ -450,10 +662,10 @@ if (isProduction) {
       return res.status(404).json({ error: 'Not found' });
     }
     // For all other routes, serve the SPA
-    res.sendFile(path.join(__dirname, '../web/dist/index.html'));
+    res.sendFile(path.join(distPath, 'index.html'));
   });
 } else {
-  // In development, redirect to Vite dev server (requires FRONTEND_URL)
+  // In development without dist folder, redirect to Vite dev server (requires FRONTEND_URL)
   app.use((req, res) => {
     // API and auth routes should have been handled above
     if (req.path.startsWith('/api') || req.path.startsWith('/auth')) {
@@ -468,8 +680,8 @@ if (isProduction) {
 
 app.listen(port, () => {
   console.log(`Server listening on http://localhost:${port}`);
-  if (isProduction) {
-    console.log(`Serving production build from: ${path.join(__dirname, '../web/dist')}`);
+  if (isProduction || distExists) {
+    console.log(`Serving production build from: ${distPath}`);
   } else {
     console.log(`Redirecting to frontend dev server: ${FRONTEND_URL}`);
   }

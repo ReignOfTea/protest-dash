@@ -37,11 +37,14 @@ function App() {
   const [pushing, setPushing] = useState(false)
   const [user, setUser] = useState<User | null>(null)
   const [authLoading, setAuthLoading] = useState(true)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
 
   // Check authentication status
   useEffect(() => {
     let cancelled = false
     ;(async () => {
+      // Small delay to ensure session cookie is available after OAuth redirect
+      await new Promise(resolve => setTimeout(resolve, 100))
       try {
         const resp = await axios.get('/api/auth/me')
         if (cancelled) return
@@ -294,15 +297,29 @@ function App() {
     return <Login />
   }
 
+  const closeSidebar = () => setSidebarOpen(false)
+
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      {/* Mobile menu button */}
+      <button 
+        className="mobile-menu-button"
+        onClick={() => setSidebarOpen(!sidebarOpen)}
+        aria-label="Toggle menu"
+      >
+        {sidebarOpen ? '✕' : '☰'}
+      </button>
+      
+      {/* Mobile overlay */}
+      {sidebarOpen && <div className="sidebar-overlay open" onClick={closeSidebar} />}
+      
+      <aside className={`sidebar ${sidebarOpen ? 'open' : ''}`}>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflowY: 'auto', minHeight: 0 }}>
           <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexDirection: 'column' }}>
-            <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
-              <button onClick={() => setView('locations')} className={`file-button ${view==='locations' ? 'active' : ''}`}>Location Control</button>
-              <button onClick={() => setView('content')} className={`file-button ${view==='content' ? 'active' : ''}`}>Content Control</button>
-              <button onClick={() => setView('files')} className={`file-button ${view==='files' ? 'active' : ''}`}>Files</button>
+            <div style={{ display: 'flex', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+              <button onClick={() => { setView('locations'); closeSidebar(); }} className={`file-button ${view==='locations' ? 'active' : ''}`}>Location Control</button>
+              <button onClick={() => { setView('content'); closeSidebar(); }} className={`file-button ${view==='content' ? 'active' : ''}`}>Content Control</button>
+              <button onClick={() => { setView('files'); closeSidebar(); }} className={`file-button ${view==='files' ? 'active' : ''}`}>Files</button>
             </div>
             <div style={{ padding: '8px 0', borderBottom: '1px solid var(--border)', marginBottom: 8 }}>
               <div style={{ fontSize: 14, color: 'var(--muted)' }}>Logged in as</div>
@@ -320,7 +337,7 @@ function App() {
                   return (
                     <button
                       key={name}
-                      onClick={() => setSelected(name)}
+                      onClick={() => { setSelected(name); closeSidebar(); }}
                       className={`file-button ${isSelected ? 'active' : ''}`}
                     >
                       {name} {dirty ? '•' : ''}

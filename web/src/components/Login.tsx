@@ -31,6 +31,9 @@ export default function Login() {
         <button onClick={handleLogin} style={{ background: '#5865F2', width: '100%', marginTop: 16 }}>
           Login with Discord
         </button>
+        <p style={{ marginTop: 16, fontSize: 12, color: 'var(--muted)' }}>
+          Note: If you're rate limited, enable DEV_BYPASS_AUTH=true in your .env file
+        </p>
       </div>
     </div>
   )
