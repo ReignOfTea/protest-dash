@@ -12,6 +12,7 @@ import type { RepeatingEvent } from './components/RepeatingEventsEditor'
 import LiveEditor from './components/LiveEditor'
 import type { LiveEntry } from './components/LiveEditor'
 import Dashboard from './components/Dashboard'
+import Admin from './components/Admin'
 import ContentDashboard from './components/ContentDashboard'
 import ActionsStatus from './components/ActionsStatus'
 import Login, { type User } from './components/Login'
@@ -30,7 +31,7 @@ const EDITABLE_FILES = ['about.json', 'attend.json', 'more.json', 'locations.jso
 function App() {
   const [files] = useState<string[]>(EDITABLE_FILES)
   const [selected, setSelected] = useState<string>('about.json')
-  const [view, setView] = useState<'files' | 'locations' | 'content'>('locations')
+  const [view, setView] = useState<'files' | 'locations' | 'content' | 'admin'>('locations')
   const [stateByFile, setStateByFile] = useState<Record<string, FileState>>({})
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -320,6 +321,9 @@ function App() {
               <button onClick={() => { setView('locations'); closeSidebar(); }} className={`file-button ${view==='locations' ? 'active' : ''}`}>Location Control</button>
               <button onClick={() => { setView('content'); closeSidebar(); }} className={`file-button ${view==='content' ? 'active' : ''}`}>Content Control</button>
               <button onClick={() => { setView('files'); closeSidebar(); }} className={`file-button ${view==='files' ? 'active' : ''}`}>Files</button>
+              {user?.isAdmin && (
+                <button onClick={() => { setView('admin'); closeSidebar(); }} className={`file-button ${view==='admin' ? 'active' : ''}`}>Admin</button>
+              )}
             </div>
             <div style={{ padding: '8px 0', borderBottom: '1px solid var(--border)', marginBottom: 8 }}>
               <div style={{ fontSize: 14, color: 'var(--muted)' }}>Logged in as</div>
@@ -381,6 +385,8 @@ function App() {
             more={(stateByFile['more.json']?.content as InfoData) || { title: '', sections: [] }}
             setMore={(next) => setStateByFile(prev => ({ ...prev, ['more.json']: { ...(prev['more.json'] || { dirty: false }), content: next, dirty: true } }))}
           />
+        ) : view === 'admin' ? (
+          <Admin currentUserId={user.id} />
         ) : (
         <>
         <h1 style={{ marginTop: 0 }}>{selected}</h1>

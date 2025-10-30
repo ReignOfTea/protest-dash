@@ -17,11 +17,24 @@ const app = express();
 const port = process.env.PORT || 3001;
 const isProduction = process.env.NODE_ENV === 'production';
 
+// Logging setup (LOG_LEVEL: debug | info | warn | error)
+const LOG_LEVEL = (process.env.LOG_LEVEL || (isProduction ? 'info' : 'debug')).toLowerCase();
+const LEVEL_RANK = { debug: 10, info: 20, warn: 30, error: 40 };
+const currentRank = LEVEL_RANK[LOG_LEVEL] || LEVEL_RANK.info;
+function shouldLog(level) { return (LEVEL_RANK[level] || 999) >= currentRank; }
+function ts() { return new Date().toISOString(); }
+const logger = {
+  debug: (...args) => { if (shouldLog('debug')) console.debug(`[${ts()}] [DEBUG]`, ...args); },
+  info:  (...args) => { if (shouldLog('info'))  console.info(`[${ts()}] [INFO ]`, ...args); },
+  warn:  (...args) => { if (shouldLog('warn'))  console.warn(`[${ts()}] [WARN ]`, ...args); },
+  error: (...args) => { if (shouldLog('error')) console.error(`[${ts()}] [ERROR]`, ...args); },
+};
+
 // Development bypass mode - skip Discord OAuth
 const DEV_BYPASS_AUTH = !isProduction && process.env.DEV_BYPASS_AUTH === 'true';
 if (DEV_BYPASS_AUTH) {
-  console.warn('⚠️  DEVELOPMENT MODE: Authentication bypass enabled');
-  console.warn('⚠️  This should NEVER be enabled in production!');
+  logger.warn('DEVELOPMENT MODE: Authentication bypass enabled');
+  logger.warn('This should NEVER be enabled in production!');
 }
 
 // Validate required environment variables
@@ -30,8 +43,8 @@ const requiredEnvVars = ['GITHUB_TOKEN', 'SESSION_SECRET'];
 const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName]);
 
 if (missingEnvVars.length > 0) {
-  console.error('Missing required environment variables:', missingEnvVars.join(', '));
-  console.error('Please check your .env file.');
+  logger.error('Missing required environment variables:', missingEnvVars.join(', '));
+  logger.error('Please check your .env file.');
   process.exit(1);
 }
 
@@ -99,6 +112,101 @@ const BRANCH = 'master';
 const FILE_DIR = 'data';
 const USERS_FILE = path.join(__dirname, 'users.json');
 
+// Permissions helpers
+function loadUsersFile() {
+  try {
+    if (!fs.existsSync(USERS_FILE)) {
+      fs.writeFileSync(USERS_FILE, JSON.stringify([], null, 2));
+      return [];
+    }
+    const fileContent = fs.readFileSync(USERS_FILE, 'utf8');
+    const parsed = JSON.parse(fileContent);
+    if (Array.isArray(parsed)) {
+      // Back-compat: if array of strings, treat as editor users
+      if (parsed.length === 0) return [];
+      if (typeof parsed[0] === 'string') {
+        return parsed.map(id => ({ id: String(id), role: 'editor' }));
+      }
+      // Normalize objects
+      return parsed.map(u => ({
+        id: String(u.id),
+        role: u.role === 'admin' ? 'admin' : 'editor',
+        username: u.username ? String(u.username) : undefined,
+        discriminator: u.discriminator ? String(u.discriminator) : undefined,
+        avatar: u.avatar ? String(u.avatar) : undefined,
+        anonHash: u.anonHash ? String(u.anonHash) : undefined,
+      }));
+    }
+    return [];
+  } catch (err) {
+    logger.error('Failed to read users.json:', err.message);
+    return [];
+  }
+}
+
+function saveUsersFile(users) {
+  try {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+    return true;
+  } catch (err) {
+    logger.error('Failed to write users.json:', err.message);
+    return false;
+  }
+}
+
+function getUserRecord(discordId) {
+  const users = loadUsersFile();
+  const idStr = String(discordId);
+  const rec = users.find(u => String(u?.id) === idStr || String(u) === idStr);
+  if (!rec) return null;
+  if (typeof rec === 'string') return { id: idStr, role: 'editor' };
+  return {
+    id: String(rec.id),
+    role: rec.role === 'admin' ? 'admin' : 'editor',
+    username: rec.username,
+    discriminator: rec.discriminator,
+    avatar: rec.avatar,
+    anonHash: rec.anonHash,
+  };
+}
+
+function upsertUserProfile({ id, username, discriminator, avatar }) {
+  const idStr = String(id);
+  const users = loadUsersFile();
+  const normalized = users.map(u => (typeof u === 'string' ? { id: String(u), role: 'editor' } : u));
+  let found = false;
+  for (let i = 0; i < normalized.length; i++) {
+    if (String(normalized[i].id) === idStr) {
+      found = true;
+      normalized[i] = {
+        id: idStr,
+        role: normalized[i].role === 'admin' ? 'admin' : 'editor',
+        username: username || normalized[i].username,
+        discriminator: discriminator || normalized[i].discriminator,
+        avatar: avatar || normalized[i].avatar,
+        anonHash: normalized[i].anonHash || generateAnonHash(),
+      };
+      break;
+    }
+  }
+  if (!found) {
+    normalized.push({
+      id: idStr,
+      role: 'editor',
+      username,
+      discriminator,
+      avatar,
+      anonHash: generateAnonHash(),
+    });
+  }
+  saveUsersFile(normalized);
+}
+
+function generateAnonHash() {
+  const crypto = require('crypto');
+  return crypto.randomBytes(8).toString('hex'); // 16 hex chars
+}
+
 function getGithubHeaders() {
   const token = process.env.GITHUB_TOKEN;
   if (!token) {
@@ -113,23 +221,8 @@ function getGithubHeaders() {
 
 // Check if user ID is allowed (from local users.json)
 async function isUserAllowed(discordId) {
-  try {
-    if (!fs.existsSync(USERS_FILE)) {
-      console.warn('users.json not found, creating empty file');
-      fs.writeFileSync(USERS_FILE, JSON.stringify([], null, 2));
-      return false;
-    }
-    const fileContent = fs.readFileSync(USERS_FILE, 'utf8');
-    const allowedIds = JSON.parse(fileContent);
-    if (!Array.isArray(allowedIds)) {
-      console.error('users.json must contain an array of Discord user IDs');
-      return false;
-    }
-    return allowedIds.map(id => String(id)).includes(String(discordId));
-  } catch (err) {
-    console.error('Failed to check users.json:', err.message);
-    return false;
-  }
+  const rec = getUserRecord(discordId);
+  return !!rec;
 }
 
 // Passport serialization
@@ -150,16 +243,19 @@ if (!DEV_BYPASS_AUTH) {
     scope: ['identify']
   }, async (accessToken, refreshToken, profile, done) => {
   try {
-    const allowed = await isUserAllowed(profile.id);
-    if (!allowed) {
+    const rec = getUserRecord(profile.id);
+    if (!rec) {
       // Store the user ID in the error info so we can pass it to the frontend
       return done(null, false, { message: 'User not authorized', userId: profile.id });
     }
+    // Update stored profile and ensure anon hash exists
+    upsertUserProfile({ id: profile.id, username: profile.username, discriminator: profile.discriminator, avatar: profile.avatar });
     return done(null, {
       id: profile.id,
       username: profile.username,
       discriminator: profile.discriminator,
-      avatar: profile.avatar
+      avatar: profile.avatar,
+      isAdmin: rec.role === 'admin'
     });
   } catch (err) {
     return done(err);
@@ -182,6 +278,7 @@ function requireAuth(req, res, next) {
 
 // Simple helper to hit GitHub REST
 async function ghGet(url) {
+  logger.debug('GitHub GET', { url });
   return axios.get(url, { headers: getGithubHeaders() });
 }
 
@@ -192,6 +289,7 @@ async function fetchJsonFile(path) {
   const contentBase64 = response.data.content;
   const jsonText = Buffer.from(contentBase64, 'base64').toString('utf8');
   const parsed = JSON.parse(jsonText);
+  logger.debug('Fetched JSON from GitHub', { path, sha: response.data.sha });
   return { sha: response.data.sha, content: parsed };
 }
 
@@ -204,38 +302,38 @@ app.get('/api/auth/me', (req, res) => {
         id: 'dev-user-123',
         username: 'dev-user',
         discriminator: '0',
-        avatar: null
+        avatar: null,
+        isAdmin: true
       }
     });
   }
   
-  // Debug logging
-  console.log('Auth check - Session ID:', req.sessionID);
-  console.log('Auth check - Authenticated:', req.isAuthenticated());
-  console.log('Auth check - User:', req.user);
-  console.log('Auth check - Cookies:', req.headers.cookie);
-  console.log('Auth check - Session passport:', req.session?.passport);
-  console.log('Auth check - Session user:', req.session?.user);
+  logger.debug('Auth check', {
+    sessionId: req.sessionID,
+    isAuthenticated: req.isAuthenticated(),
+    user: req.user,
+    hasCookie: !!req.headers.cookie,
+  });
   
   // Check if session exists in store (async, but log anyway)
   if (req.sessionID) {
     sessionStore.get(req.sessionID, (err, session) => {
       if (err) {
-        console.error('Error checking session store:', err);
+        logger.error('Error checking session store:', err);
       } else {
-        console.log('Session in store for', req.sessionID + ':', session ? 'Found' : 'Not found');
-        if (session) {
-          console.log('Session data in store:', {
-            passport: session.passport,
-            user: session.user
-          });
-        }
+        logger.debug('Session in store check', { sessionId: req.sessionID, found: !!session });
       }
     });
   }
   
   if (req.isAuthenticated()) {
-    return res.json({ user: req.user });
+    // Attach latest isAdmin in case roles changed after login
+    const rec = getUserRecord(req.user?.id);
+    const userOut = {
+      ...(req.user || {}),
+      isAdmin: !!rec && rec.role === 'admin'
+    };
+    return res.json({ user: userOut });
   }
   return res.json({ user: null });
 });
@@ -247,7 +345,7 @@ if (!DEV_BYPASS_AUTH) {
   app.get('/auth/discord/callback', (req, res, next) => {
   passport.authenticate('discord', (err, user, info) => {
     if (err) {
-      console.error('Discord OAuth error:', err);
+      logger.error('Discord OAuth error:', err);
       return next(err);
     }
     if (!user) {
@@ -266,7 +364,7 @@ if (!DEV_BYPASS_AUTH) {
     }
     req.logIn(user, (err) => {
       if (err) {
-        console.error('Login error:', err);
+        logger.error('Login error:', err);
         return next(err);
       }
       
@@ -274,7 +372,7 @@ if (!DEV_BYPASS_AUTH) {
       // Ensure session is saved - Passport should have already modified it via logIn
       req.session.save((err) => {
         if (err) {
-          console.error('Session save error:', err);
+          logger.error('Session save error:', err);
           return next(err);
         }
         
@@ -282,19 +380,12 @@ if (!DEV_BYPASS_AUTH) {
         const savedSessionId = req.sessionID;
         sessionStore.get(savedSessionId, (err, session) => {
           if (err) {
-            console.error('Error checking session store:', err);
+            logger.error('Error checking session store:', err);
           } else {
-            console.log('Session in store:', session ? 'Found' : 'Not found');
-            if (session) {
-              console.log('Session user in store:', session.user || session.passport?.user);
-            }
+            logger.debug('Session in store:', { found: !!session });
           }
           
-          // Verify session is saved
-          console.log('OAuth success - Session ID:', savedSessionId);
-          console.log('OAuth success - User authenticated:', req.isAuthenticated());
-          console.log('OAuth success - User:', req.user);
-          console.log('OAuth success - Cookie will be:', req.session.cookie);
+          logger.info('OAuth success', { sessionId: savedSessionId, user: req.user && { id: req.user.id, username: req.user.username } });
           
           let redirectUrl;
           if (isProduction && !FRONTEND_URL) {
@@ -313,12 +404,11 @@ if (!DEV_BYPASS_AUTH) {
             }
           }
           
-          console.log('OAuth success, redirecting to:', redirectUrl);
+          logger.debug('OAuth redirect', { redirectUrl });
           
           // express-session automatically sets the cookie when we save
           // The redirect response should include the Set-Cookie header
-          console.log('OAuth success - Final session ID:', savedSessionId);
-          console.log('OAuth success - Response headers will include Set-Cookie for session');
+          logger.debug('OAuth final session', { sessionId: savedSessionId });
           
           return res.redirect(302, redirectUrl);
         });
@@ -335,15 +425,78 @@ app.post('/api/auth/logout', (req, res) => {
   });
 });
 
+// ===== ADMIN ROUTES =====
+function requireAdmin(req, res, next) {
+  if (DEV_BYPASS_AUTH) return next();
+  if (!req.isAuthenticated()) return res.status(401).json({ error: 'Unauthorized' });
+  const rec = getUserRecord(req.user?.id);
+  if (rec && rec.role === 'admin') return next();
+  return res.status(403).json({ error: 'Forbidden' });
+}
+
+// List users (normalized)
+app.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
+  const users = loadUsersFile().map(u => {
+    if (typeof u === 'string') return { id: String(u), role: 'editor' };
+    return {
+      id: String(u.id),
+      role: u.role === 'admin' ? 'admin' : 'editor',
+      username: u.username,
+      discriminator: u.discriminator,
+      avatar: u.avatar,
+    };
+  });
+  res.json({ users });
+});
+
+// Add user { id, role }
+app.post('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
+  const { id, role } = req.body || {};
+  const userId = String(id || '').trim();
+  const userRole = role === 'admin' ? 'admin' : 'editor';
+  if (!userId) return res.status(400).json({ error: 'Missing id' });
+  const users = loadUsersFile().map(u => (typeof u === 'string' ? { id: String(u), role: 'editor' } : { id: String(u.id), role: u.role === 'admin' ? 'admin' : 'editor' }));
+  if (users.some(u => u.id === userId)) return res.status(409).json({ error: 'User already exists' });
+  users.push({ id: userId, role: userRole });
+  if (!saveUsersFile(users)) return res.status(500).json({ error: 'Failed to save users' });
+  res.json({ ok: true });
+});
+
+// Update role
+app.put('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
+  const userId = String(req.params.id || '').trim();
+  const { role } = req.body || {};
+  const userRole = role === 'admin' ? 'admin' : 'editor';
+  const users = loadUsersFile().map(u => (typeof u === 'string' ? { id: String(u), role: 'editor' } : { id: String(u.id), role: u.role === 'admin' ? 'admin' : 'editor' }));
+  const idx = users.findIndex(u => u.id === userId);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  users[idx].role = userRole;
+  if (!saveUsersFile(users)) return res.status(500).json({ error: 'Failed to save users' });
+  res.json({ ok: true });
+});
+
+// Remove user
+app.delete('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
+  const userId = String(req.params.id || '').trim();
+  let users = loadUsersFile().map(u => (typeof u === 'string' ? { id: String(u), role: 'editor' } : { id: String(u.id), role: u.role === 'admin' ? 'admin' : 'editor' }));
+  const before = users.length;
+  users = users.filter(u => u.id !== userId);
+  if (users.length === before) return res.status(404).json({ error: 'Not found' });
+  if (!saveUsersFile(users)) return res.status(500).json({ error: 'Failed to save users' });
+  res.json({ ok: true });
+});
+
 // ===== PROTECTED ROUTES =====
 // GET current about.json content (legacy route for back-compat)
 app.get('/api/about', requireAuth, async (req, res) => {
   try {
+    logger.debug('GET /api/about', { userId: req.user?.id });
     const data = await fetchJsonFile(`${FILE_DIR}/about.json`);
     return res.json(data);
   } catch (err) {
     const status = err.response?.status || 500;
     const message = err.response?.data || { message: err.message };
+    logger.error('Failed to fetch about.json', { status, message });
     return res.status(status).json({ error: 'Failed to fetch about.json', details: message });
   }
 });
@@ -352,6 +505,7 @@ app.get('/api/about', requireAuth, async (req, res) => {
 // Body: { content: object, commitMessage?: string, baseSha?: string }
 app.post('/api/about', requireAuth, async (req, res) => {
   try {
+    logger.info('POST /api/about', { userId: req.user?.id });
     const { content, commitMessage, baseSha } = req.body || {};
     if (!content || typeof content !== 'object') {
       return res.status(400).json({ error: 'Invalid content payload' });
@@ -381,10 +535,12 @@ app.post('/api/about', requireAuth, async (req, res) => {
       { headers: getGithubHeaders() }
     );
 
+    logger.info('about.json updated', { commitSha: putResp.data.commit?.sha });
     return res.json({ ok: true, commit: putResp.data.commit });
   } catch (err) {
     const status = err.response?.status || 500;
     const message = err.response?.data || { message: err.message };
+    logger.error('Failed to update about.json', { status, message });
     return res.status(status).json({ error: 'Failed to update about.json', details: message });
   }
 });
@@ -396,6 +552,7 @@ app.get('/api/file/:name', requireAuth, async (req, res) => {
     if (!name || /\//.test(name)) {
       return res.status(400).json({ error: 'Invalid file name' });
     }
+    logger.debug('GET /api/file/:name', { userId: req.user?.id, name });
     const data = await fetchJsonFile(`${FILE_DIR}/${name}`);
     return res.json(data);
   } catch (err) {
@@ -409,15 +566,18 @@ app.get('/api/file/:name', requireAuth, async (req, res) => {
       else if (name === 'repeating-events.json') defaultContent = [];
       else if (name === 'live.json') defaultContent = [];
       else defaultContent = { title: '', sections: [] };
+      logger.info('File not found on GitHub, returning default', { name });
       return res.json({ sha: null, content: defaultContent, notFound: true });
     }
     const message = err.response?.data || { message: err.message };
+    logger.error('Failed to fetch file', { name: req.params.name, status, message });
     return res.status(status).json({ error: 'Failed to fetch file', details: message });
   }
 });
 
 // List editable files (static for now)
 app.get('/api/files', requireAuth, async (req, res) => {
+  logger.debug('GET /api/files', { userId: req.user?.id });
   return res.json({ files: ['about.json', 'attend.json', 'more.json', 'locations.json', 'times.json', 'repeating-events.json', 'live.json'] });
 });
 
@@ -496,7 +656,9 @@ app.post('/api/batch', requireAuth, async (req, res) => {
     // Get user info
     const user = req.user;
     const userId = user?.id || 'unknown';
-    const username = user?.username || 'unknown';
+    const rec = getUserRecord(userId);
+    const anon = rec?.anonHash || 'unknown';
+    logger.info('POST /api/batch', { userId, anon, fileCount: files.length });
     
     const headers = getGithubHeaders();
 
@@ -575,8 +737,8 @@ app.post('/api/batch', requireAuth, async (req, res) => {
     // Build detailed commit message
     let fullCommitMessage = commitMessage || 'Update files via dashboard';
     
-    // Add user info
-    fullCommitMessage += `\n\nUser: @${username} (ID: ${userId})`;
+    // Add user info (anonymous)
+    fullCommitMessage += `\n\nUser: ${anon}`;
     
     // Add detailed change report
     if (changeReports.length > 0) {
@@ -603,10 +765,12 @@ app.post('/api/batch', requireAuth, async (req, res) => {
       { headers }
     );
 
+    logger.info('Batch commit successful', { commitSha: newCommitSha });
     return res.json({ ok: true, commitSha: newCommitSha });
   } catch (err) {
     const status = err.response?.status || 500;
     const message = err.response?.data || { message: err.message };
+    logger.error('Batch update failed', { status, message });
     return res.status(status).json({ error: 'Batch update failed', details: message });
   }
 });
@@ -614,6 +778,7 @@ app.post('/api/batch', requireAuth, async (req, res) => {
 // Latest Actions run (e.g. pages build) with jobs
 app.get('/api/actions/latest', requireAuth, async (req, res) => {
   try {
+    logger.debug('GET /api/actions/latest', { userId: req.user?.id });
     const perPage = 1;
     const runsResp = await ghGet(`https://api.github.com/repos/${OWNER}/${REPO}/actions/runs?branch=${encodeURIComponent(BRANCH)}&per_page=${perPage}`);
     const run = runsResp.data?.workflow_runs?.[0];
@@ -643,6 +808,7 @@ app.get('/api/actions/latest', requireAuth, async (req, res) => {
   } catch (err) {
     const status = err.response?.status || 500;
     const message = err.response?.data || { message: err.message };
+    logger.error('Failed to fetch actions status', { status, message });
     return res.status(status).json({ error: 'Failed to fetch actions status', details: message });
   }
 });
@@ -682,11 +848,11 @@ if (isProduction || distExists) {
 }
 
 app.listen(port, () => {
-  console.log(`Server listening on http://localhost:${port}`);
+  logger.info(`Server listening on http://localhost:${port}`);
   if (isProduction || distExists) {
-    console.log(`Serving production build from: ${distPath}`);
+    logger.info(`Serving production build from: ${distPath}`);
   } else {
-    console.log(`Redirecting to frontend dev server: ${FRONTEND_URL}`);
+    logger.info(`Redirecting to frontend dev server: ${FRONTEND_URL}`);
   }
 });
 

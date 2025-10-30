@@ -5,6 +5,7 @@ export type User = {
   username: string
   discriminator: string
   avatar?: string
+  isAdmin?: boolean
 }
 
 export default function Login() {
