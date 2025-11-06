@@ -4,6 +4,7 @@ import type { LocationEntry } from './LocationsEditor'
 export type TimeEntry = {
     locationId: string
     datetime: string
+    about?: string
 }
 
 type Props = {
@@ -52,7 +53,14 @@ export default function TimesEditor({ value, onChange, locations, onCreateLocati
 
     const update = (index: number, patch: Partial<TimeEntry>) => {
         const next = value.slice()
-        next[index] = { ...next[index], ...patch }
+        const updated = { ...next[index], ...patch }
+        // Remove 'about' field if it's empty
+        if ('about' in updated && (!updated.about || updated.about.trim() === '')) {
+            const { about, ...rest } = updated
+            next[index] = rest
+        } else {
+            next[index] = updated
+        }
         onChange(next)
     }
 
@@ -143,6 +151,16 @@ export default function TimesEditor({ value, onChange, locations, onCreateLocati
                         </div>
                         <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
                             <button type="button" onClick={() => removeEntry(idx)} style={{ background: '#ef4444' }}>Remove</button>
+                        </div>
+                        <div style={{ gridColumn: '1 / -1' }}>
+                            <label style={{ fontWeight: 600 }}>About (optional)</label>
+                            <textarea
+                                value={t.about || ''}
+                                onChange={e => update(idx, { about: e.target.value })}
+                                placeholder="Add optional about text..."
+                                rows={3}
+                                style={{ width: '100%', resize: 'vertical' }}
+                            />
                         </div>
 
                         {creatingForIndex === idx && (
